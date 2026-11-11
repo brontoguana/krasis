@@ -201,6 +201,7 @@ fn calibrate_full_queues(
     maximum_cold: usize,
     scratch: &Scratch,
     bytes: usize,
+    extra_partition: bool,
 ) -> Result<Plan, String> {
     let samples = experts.len().min(40);
     let mut baseline_samples = vec![Vec::new(); maximum_cold + 1];
@@ -277,7 +278,22 @@ fn calibrate_full_queues(
     }
     let handoff_ms = 0.1;
     let estimates = crate::cpu_cold_plan::choose_observed_queues(maximum_cold,&baselines,&costs,handoff_ms)?;
-    let counts = estimates.iter().map(|p|p.cpu_count).collect::<Vec<_>>();
+    let mut counts = estimates.iter().map(|p|p.cpu_count).collect::<Vec<_>>();
+    let calibrated_counts=counts.clone();
+    let mut extra_policy=json!({"applied":false});
+    if (cfg!(feature="live-switches") || crate::optimisations::CPU_INT8_DEPTH5_THREE)
+        && extra_partition && workers.len()>=3 && maximum_cold>=5 && counts[5]==2
+        && experts[0].hidden_size==4096 && experts[0].intermediate_size==2048 {
+        if let Some((_,_,samples))=costs.iter().find(|(cpu,gpu,_)|*cpu==3 && *gpu==2) {
+            let proposed=samples.iter().sum::<f64>()/samples.len()as f64+handoff_ms;
+            let selected=estimates[5].critical_ms;
+            let admitted=proposed<=selected*1.10 && proposed<baselines[5];
+            if admitted {counts[5]=3;}
+            extra_policy=json!({"applied":admitted,"cold_depth":5,"proposed_cpu_count":3,
+                "calibrated_critical_ms":selected,"proposed_critical_ms":proposed,
+                "maximum_ratio":1.10,"scope":"Experimental shared-overlap allowance; not the measured queue optimum"});
+        }
+    }
     let predictions = estimates.iter().map(|p|json!({"cold":p.cold,"cpu_count":p.cpu_count,
         "predicted_ms":p.critical_ms,"gpu_only_copy_ms":p.gpu_only_ms})).collect::<Vec<_>>();
     Ok(Plan { counts:counts.clone(), receipt:json!({
@@ -288,6 +304,7 @@ fn calibrate_full_queues(
         "gpu_only_queue_samples_ms":baseline_samples,"gpu_only_queue_mean_ms":baselines,
         "selection_objective":"mean paired complete-queue wall time","handoff_allowance_ms":handoff_ms,
         "measurements":measurements,"predictions":predictions,"counts":counts,
+        "calibrated_counts":calibrated_counts,"experimental_depth5":extra_policy,
         "ownership":"existing immutable host weights; private startup scratch drained before destruction",
         "adq":false
     }) })
@@ -300,6 +317,7 @@ pub(crate) fn calibrate(
     experts: &[CpuTailExpertRef],
     maximum_cold: usize,
     tier: Option<&crate::streamed_cold::Runtime>,
+    extra_partition: bool,
 ) -> Result<Plan, String> {
     if workers.is_empty()
         || workers.len() > 4
@@ -332,7 +350,7 @@ pub(crate) fn calibrate(
     }
     let scratch = Scratch::new(bytes,tier)?;
     if crate::optimisations::CPU_FULL_QUEUE_PLANNER && maximum_cold <= 8 {
-        return calibrate_full_queues(workers,experts,maximum_cold,&scratch,bytes);
+        return calibrate_full_queues(workers,experts,maximum_cold,&scratch,bytes,extra_partition);
     }
     let samples = experts.len().min(40);
     let mut dma_baseline = Vec::new();

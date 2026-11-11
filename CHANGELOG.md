@@ -13590,6 +13590,10 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 
 - Add current-reader CPU_INT8_K_MAJOR behind a default-off switch, with live control dispatch once when constructing monomorphised persistent worker teams. Cache separate worker pools/calibration for each effective set; no per-dot runtime branch. Model speed and quality qualification pending.
 
+## 2026-11-11 — original-precision promotions with fitted staging
+- Prepare default-off STREAMED_COLD_PROMOTIONS on the cumulative fitted/pruning stack. Read original host payloads for resident upgrades, retain fitted demand staging, and count the extra promotion traffic. Live test dispatch is supported without additional loaded representations. End-to-end speed, fast tier and lifecycle qualification pending; no gain claimed.
+
+- Prepare live fitted/original selection using representations already required for original CPU/resident weights and fitted demand staging. No extra model backing is loaded. Change transfer dispatch and queue calibration together and invalidate cached model state; normal builds retain compile-out paths. This extension is not yet compiled or measured. Host repacking still requires a separate loaded layout.
 ## 2026-11-11 — controlled diagnostic parity
 - Add test-build-only replay of execution decisions for parity: validate switch hash, geometry, worker affinities/count bounds and shared-W2 launch shapes. Preserve freshly measured costs and original plan provenance separately. Natural normal/test startups selected different CPU depth-five counts and shared-W2 splits, so their bit comparisons do not isolate dispatch. Kernel and normal-build execution code are unchanged. Controlled parity remains pending.
 
@@ -13616,3 +13620,23 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 ## 2026-11-11 — adopt INT8 CPU expert dots
 - Enable CPU_INT8_K_MAJOR after interleaved3K78.915→75.958,16K80.025→76.402,65K82.581→78.374ms/token; all paired samples favour it. Preserve the existing supported Marlin/1024-output-band guard and unchanged readers for other formats/band sizes. Native compile-time dispatch and diagnostic per-call monomorphised workers retain no per-dot flag read.
 - Fast tier passes:KL0.009119,97.396%greedy agreement;JSON1/12 unchanged,retrieval12/12 unchanged,coding1/12→2/12. Whole-build planner selects2rather than3CPUexperts at depth five, increasing inferred expert demand0.75070→0.79923GB/forward despite5.1%lower decode time. Keep the gain and target payload reduction next. Batched normal-build confirmation and full ADQ remain pending; no release.
+
+- Restack the unqualified promotion/live-format prototype on current cumulative defaults and capability/teardown guards. Request diagnostic compact identity only when its companion exists; leave normal unrelated cache loading unchanged. Native build and serving qualification remain pending.
+
+- Narrow the unqualified follow-up to original-precision promotions only; keep the already adopted fitted representation fixed at load time. Avoid adding unneeded format-switch ownership/calibration branches to this experiment. Existing resident and CPU weights provide the promotion source; no extra representation is allocated.
+
+## 2026-11-11 — prepare bounded four-route cold pruning
+- Add default-off COLD_EXPERT_PRUNING_FOUR, requiring the existing five-route policy. Protect four leading routes and permit at most30%of routed mass to be omitted from cold experts; retain resident experts, no renormalisation, nonfinite guards and existing unsupported-mode fallbacks. Select policy once between requests in diagnostic builds.
+- Extend existing policy guard assertions for the new parameter set. Serving speed/quality and native compilation are pending; no adoption or saving claimed.
+
+- Emit a request-end expert-DMA counter in diagnostic live builds, including explicitly counted original-host promotion upgrades. Preserve zero normal-build logging overhead and all hot kernels. Profile totals remain separate because these counters exclude activation/metadata and out-of-boundary reload traffic.
+
+- Prepare default-off CPU_INT8_DEPTH5_THREE to test whether shared overlap can hide a third CPU expert at cold depth five. Require the measured3CPU/2GPU queue to remain within10%of this selection's own calibrated optimum and faster than GPU-only; retain the optimum and actual override in receipts. Restrict the existing INT8 reader geometry and preserve normal off paths. No speed or quality verdict yet.
+
+- Add optional diagnostic canonical residency reset between requests before promotion A/B:trim only chunks containing changed slots, restore original heatmap labels/host mirrors with existing helpers, reload, reset recency, verify resident identities and600MiB reserve. Keep it outside inference and allocate no extra weight backing. Expose reset duration/proof in each selection receipt. Native compilation and ownership smoke remain pending.
+
+- Clear the diagnostic soft-residency pressure cap when restoring the canonical ranking; the normal reload still enforces actual free memory and the600MiB reserve. This prevents one arm from inheriting another arm's temporary pressure limit.
+
+- Prepare default-off STREAMED_COLD_PROMOTION_FITTED_PAYLOAD requiring compact promotions. Reuse the existing device-to-device promotion path for expanded fitted payloads, avoiding the extra original-host upgrade copy. This intentionally changes resident precision; only source-backed HCS is supported, while mirrored mode keeps compact promotions disabled. Record actual payload mode. Speed, fast tier and lifecycle qualification remain pending; no gain claimed.
+
+- Compose the transfer diagnostics with the already accepted CPU INT8 and shared-overlap defaults. Promotion, fitted-promotion, extra-CPU and four-route switches remain off in this prepared branch until their own paired speed/quality verdicts; primary development defaults are unchanged.

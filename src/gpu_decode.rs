@@ -6487,7 +6487,10 @@ impl HcsState {
         promo: &DynamicHcsPromotion,
         stream: cuda_sys::CUstream,
         timing: bool,
+        original_host_source: bool,
     ) -> Result<bool, String> {
+        let original_host_source = (cfg!(feature = "live-switches") || crate::optimisations::STREAMED_COLD_PROMOTIONS)
+            && original_host_source;
         if !self.dynamic_enabled {
             return Ok(false);
         }
@@ -6634,32 +6637,39 @@ impl HcsState {
             }
         }
 
-        let copy_part = |dst_off: usize, src_off: usize, bytes: usize| -> Result<(), String> {
+        let copy_part = |dst_off: usize, src_off: usize, host: usize, bytes: usize| -> Result<(), String> {
             if bytes == 0 {
                 return Ok(());
             }
             let err = unsafe {
-                cuda_sys::lib().cuMemcpyDtoDAsync_v2(
-                    dst + dst_off as u64,
-                    promo.src_base + src_off as u64,
-                    bytes,
-                    stream,
-                )
+                if original_host_source {
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        dst + dst_off as u64, host as *const std::ffi::c_void,
+                        bytes, stream,
+                    )
+                } else {
+                    cuda_sys::lib().cuMemcpyDtoDAsync_v2(
+                        dst + dst_off as u64,
+                        promo.src_base + src_off as u64,
+                        bytes,
+                        stream,
+                    )
+                }
             };
             if err == cuda_sys::CUresult::CUDA_SUCCESS {
                 Ok(())
             } else {
                 Err(format!(
-                    "cuMemcpyDtoDAsync_v2 dynamic HCS promotion: {:?}",
+                    "dynamic HCS promotion copy: {:?}",
                     err
                 ))
             }
         };
         let d2d_submit_start = timing.then(std::time::Instant::now);
-        copy_part(dst_w13p_off, promo.src_w13p_off, promo.w13p_bytes)?;
-        copy_part(dst_w13s_off, promo.src_w13s_off, promo.w13s_bytes)?;
-        copy_part(dst_w2p_off, promo.src_w2p_off, promo.w2p_bytes)?;
-        copy_part(dst_w2s_off, promo.src_w2s_off, promo.w2s_bytes)?;
+        copy_part(dst_w13p_off, promo.src_w13p_off, promo.w13p_host, promo.w13p_bytes)?;
+        copy_part(dst_w13s_off, promo.src_w13s_off, promo.w13s_host, promo.w13s_bytes)?;
+        copy_part(dst_w2p_off, promo.src_w2p_off, promo.w2p_host, promo.w2p_bytes)?;
+        copy_part(dst_w2s_off, promo.src_w2s_off, promo.w2s_host, promo.w2s_bytes)?;
         if let Some(start) = d2d_submit_start {
             self.dynamic_promotion_d2d_submit_s += start.elapsed().as_secs_f64();
         }
@@ -6747,6 +6757,7 @@ impl HcsState {
                 }));
             }
             Some(serde_json::json!({
+                "source_kind": if original_host_source { "original_host" } else { "staging_device" },
                 "promotion_stream_sync": format!("{:?}", sync_err),
                 "all_source_device_regions_match_resident": all_device_match,
                 "all_host_source_regions_match_resident": all_host_match,
@@ -39334,8 +39345,8 @@ impl GpuDecodeStore {
         if crate::optimisations::COLD_EXPERT_PRUNING && pruning_supported {
             graph.adaptive_cold_drop = AdaptiveColdDropRuntime::from_compiled_policy();
             log::info!("Compiled cold-expert pruning: protect_rank_pct={} max_mass_pct={} renormalize=false",
-                if crate::optimisations::COLD_EXPERT_PRUNING_FIVE {62.5} else {75.0},
-                if crate::optimisations::COLD_EXPERT_PRUNING_FIVE {25} else if crate::optimisations::COLD_EXPERT_PRUNING_20 {20} else if crate::optimisations::COLD_EXPERT_PRUNING_15 {15} else {10});
+                if crate::optimisations::COLD_EXPERT_PRUNING_FOUR {50.0} else if crate::optimisations::COLD_EXPERT_PRUNING_FIVE {62.5} else {75.0},
+                if crate::optimisations::COLD_EXPERT_PRUNING_FOUR {30} else if crate::optimisations::COLD_EXPERT_PRUNING_FIVE {25} else if crate::optimisations::COLD_EXPERT_PRUNING_20 {20} else if crate::optimisations::COLD_EXPERT_PRUNING_15 {15} else {10});
         }
         log::info!(
             "GpuDecodeStore: finalized GLM-5.3 mHC workspace layers={} HC={} hidden={} capacity={}",
@@ -72932,15 +72943,32 @@ impl GpuDecodeStore {
                     graph.t_moe_apfl += t.elapsed().as_secs_f64();
                 }
             }
-            // Keep resident payloads at their original precision. Compact cold
-            // staging must never become a resident source through promotion.
-            if (crate::optimisations::STREAMED_COLD_INT3 || crate::optimisations::STREAMED_COLD_NF3) && graph.streamed_cold.is_some() { dynamic_promotions.clear(); }
+            // Original-host promotion preserves resident precision. The fitted
+            // device-copy alternative is an explicit approximation and only
+            // supports source-backed reloads, never inconsistent host mirrors.
+            let compact_source = (crate::optimisations::STREAMED_COLD_INT3
+                || crate::optimisations::STREAMED_COLD_NF3) && graph.streamed_cold.is_some();
+            let fitted_payload=graph.live_switches.STREAMED_COLD_PROMOTION_FITTED_PAYLOAD();
+            let source_backed=graph.hcs.as_ref().is_some_and(|h|h.soft_host_mode==HcsSoftHostMode::Source);
+            let allow_compact_promotions=graph.live_switches.STREAMED_COLD_PROMOTIONS()
+                && compact_source && (!fitted_payload || source_backed);
+            let original_host_promotions=allow_compact_promotions && !fitted_payload;
+            if compact_source && !allow_compact_promotions { dynamic_promotions.clear(); }
             if !dynamic_promotions.is_empty() {
                 let mut promoted = 0usize;
                 if let Some(ref mut hcs) = graph.hcs {
                     for promo in &dynamic_promotions {
-                        match hcs.dynamic_promote_from_device(promo, replay_stream, timing) {
-                            Ok(true) => promoted += 1,
+                        match hcs.dynamic_promote_from_device(promo, replay_stream, timing, original_host_promotions) {
+                            Ok(true) => {
+                                promoted += 1;
+                                if original_host_promotions {
+                                    // Include upgrade traffic; compact demand bytes alone
+                                    // would overstate the payload saving.
+                                    graph.dma_bytes_total += (promo.w13p_bytes + promo.w13s_bytes
+                                        + promo.w2p_bytes + promo.w2s_bytes) as u64;
+                                    graph.dma_call_count += 4;
+                                }
+                            },
                             Ok(false) => {}
                             Err(e) => {
                                 hcs.dynamic_copy_failures += 1;
@@ -92882,6 +92910,9 @@ impl GpuDecodeStore {
                         .collect::<Vec<_>>()
                         .join(",")
                 };
+                #[cfg(feature = "live-switches")]
+                eprintln!("LIVE EXPERT DMA SUMMARY generated={} bytes={} calls={}",
+                    generated, graph.dma_bytes_total, graph.dma_call_count);
                 // eprintln (not log::) so the line reaches captured run logs.
                 eprintln!(
                     "CPU TAIL SUMMARY generated={} attempts={} wins={} win_rate_pct={:.6} deadline_misses={} busy_skips={} short_queue_skips={} depth_admission_skips={} errors={} saved_weight_bytes={} saved_mib_per_token={:.6} output_bytes={} input_d2h_ms_per_token={:.6} worker_elapsed_ms_per_token={:.6} worker_elapsed_ms_per_attempt={:.6} race_wait_ms_per_token={:.6} win_compute_ms_avg={:.6} miss_compute_ms_avg={:.6} deadline_ms_avg={:.6} win_total_ms_avg={:.6} dispatch_lag_ms_avg={:.6} attempts_by_depth_2_to_9plus={} wins_by_depth_2_to_9plus={} marlin_attempts={} marlin_wins={} marlin_win_rate_pct={:.6} marlin_results={} marlin_worker_ms_per_attempt={:.6} marlin_saved_weight_bytes={} marlin_saved_mib_per_token={:.6} transposed_attempts={} transposed_wins={} transposed_win_rate_pct={:.6} transposed_coverage_pct={:.6} transposed_results={} transposed_worker_ms_per_attempt={:.6} transposed_saved_weight_bytes={} transposed_saved_mib_per_token={:.6} tier_experts={} tier_selected_residents={} tier_bytes={} tier_gib={:.6} tier_conversion_s={:.6} stage_results_by_depth_2_to_9plus={} activation_d2h_ms_by_depth_2_to_9plus={} submit_to_pickup_ms_by_depth_2_to_9plus={} pickup_to_worker_start_ms_by_depth_2_to_9plus={} claim_to_worker_start_ms_by_depth_2_to_9plus={} kernel_compute_ms_by_depth_2_to_9plus={} compute_to_result_visible_ms_by_depth_2_to_9plus={} cpu_activation_math=int16_quantized marlin_source=production_single_cache transposed_source=temporary_nonresident_duplicate",
@@ -99329,7 +99360,7 @@ impl GpuDecodeStore {
                             w2p_bytes: expert.w2_packed_bytes,
                             w2s_bytes: expert.w2_scales_bytes,
                         };
-                        hcs.dynamic_promote_from_device(&promotion, compute_stream, timing)
+                        hcs.dynamic_promote_from_device(&promotion, compute_stream, timing, false)
                             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
                     }
                 }
@@ -100598,7 +100629,7 @@ impl GpuDecodeStore {
                                 w2p_bytes: expert.w2_packed_bytes,
                                 w2s_bytes: expert.w2_scales_bytes,
                             };
-                            hcs.dynamic_promote_from_device(&promo, compute_stream, timing)
+                            hcs.dynamic_promote_from_device(&promo, compute_stream, timing, false)
                                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
                         }
                     }
@@ -104096,7 +104127,7 @@ impl GpuDecodeStore {
                         workers.push(CpuTailRuntime::new_compiled(graph.hidden_size,
                             graph.moe_intermediate_size,graph.group_size,index,worker_count)?);
                     }
-                    let mut plan=crate::cpu_cold_lane::calibrate(&mut workers,&sources,graph.max_experts_per_tok,graph.streamed_cold.as_ref())?;
+                    let mut plan=crate::cpu_cold_lane::calibrate(&mut workers,&sources,graph.max_experts_per_tok,graph.streamed_cold.as_ref(),crate::optimisations::CPU_INT8_DEPTH5_THREE)?;
                     let affinities=(0..worker_count).map(|i|crate::cpu_tail::compiled_lane_cpu_ids(i,worker_count)).collect::<Result<Vec<_>,_>>()?;
                     plan.receipt["cpu_ids"]=serde_json::json!(affinities);
                     plan.receipt["optimisations"]=serde_json::from_str(crate::optimisations::manifest()).map_err(|e|e.to_string())?;

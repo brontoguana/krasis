@@ -25,11 +25,69 @@ impl Calibration {
     }
 }
 impl GpuDecodeStore {
-    pub(crate) fn switch_live(&mut self, next: crate::optimisations::Selection, execution_plan: Option<&serde_json::Value>) -> Result<serde_json::Value,String> {
+    fn reset_live_residency(&mut self) -> Result<serde_json::Value,String> {
+        use sha2::{Digest,Sha256};
+        let started=std::time::Instant::now();
+        let device=self.device.clone();
+        let (repacked,trimmed,ranking_hash)={
+            let g=self.graph.as_mut().ok_or("residency reset requires a graph")?;
+            if g.glm5_hc_mean_mult.is_none() || g.gpu_route_sync {return Err("residency reset requires supported host-route GLM".into());}
+            let h=g.hcs.as_mut().ok_or("residency reset requires HCS")?;
+            let canonical=h.soft_heatmap_ranking.clone();
+            if canonical.len()<h.soft_num_slots || canonical.len()!=h.soft_ranking.len() {
+                return Err("residency reset has no complete canonical ranking".into());
+            }
+            let first=(0..h.soft_num_slots).find(|&slot|h.soft_ranking[slot]!=canonical[slot]);
+            let before=h.soft_chunks_loaded;
+            if let Some(slot)=first {
+                let chunk=h.soft_slot_chunk_and_offset(slot).0;
+                h.trim_soft_chunks_to(chunk,Some(&device));
+            }
+            let mut repacked=0usize;
+            for slot in 0..h.soft_num_slots {
+                if h.soft_ranking[slot]==canonical[slot] {continue;}
+                let (layer,expert)=canonical[slot];
+                if h.soft_host_mode==HcsSoftHostMode::Mirror
+                    && !pack_soft_host_slot(h,&g.moe_layers,slot,layer,expert) {
+                    return Err(format!("residency reset cannot repack slot {slot}"));
+                }
+                // Keep host bytes and slot labels consistent even on a later error.
+                h.soft_ranking[slot]=canonical[slot];repacked+=1;
+            }
+            h.soft_ranking=canonical.clone();
+            h.soft_pressure_cap_chunks=None;
+            let ranking_hash=format!("{:x}",Sha256::digest(serde_json::to_vec(&canonical).map_err(|e|e.to_string())?));
+            g.prompt_hcs_counts.clear();
+            (repacked,before-h.soft_chunks_loaded,ranking_hash)
+        };
+        let (loaded,reload_ms)=self.hcs_reload_after_prefill(0);
+        let sync=unsafe{cuda_sys::lib().cuCtxSynchronize()};
+        if sync!=cuda_sys::CUresult::CUDA_SUCCESS {return Err(format!("residency reset synchronization: {sync:?}"));}
+        let g=self.graph.as_mut().ok_or("residency reset lost graph")?;
+        let h=g.hcs.as_mut().ok_or("residency reset lost HCS")?;
+        let slots=h.soft_loaded_slots();
+        if !(0..slots).all(|slot|h.soft_slot_to_expert[slot]==Some(h.soft_heatmap_ranking[slot])) {
+            return Err("residency reset did not restore canonical resident identities".into());
+        }
+        h.init_dynamic_hcs();h.total_hits=0;h.total_misses=0;
+        let(mut free,mut total)=(0usize,0usize);
+        let rc=unsafe{cuda_sys::lib().cuMemGetInfo_v2(&mut free,&mut total)};
+        if rc!=cuda_sys::CUresult::CUDA_SUCCESS || free<600*1024*1024 {
+            h.trim_soft_chunks_to(0,Some(&device));
+            return Err("residency reset reserve check failed; soft residency released".into());
+        }
+        Ok(serde_json::json!({"canonical_verified":true,"ranking_sha256":ranking_hash,
+            "repacked_slots":repacked,"trimmed_chunks":trimmed,"reloaded_experts":loaded,
+            "loaded_slots":slots,"reload_ms":reload_ms,"free_mib":free/(1024*1024),
+            "seconds":started.elapsed().as_secs_f64(),"extra_weight_representations":0,
+            "scope":"Canonical heatmap residency and recency before each arm; existing trim/repack/reload owners"}))
+    }
+    pub(crate) fn switch_live(&mut self, next: crate::optimisations::Selection, execution_plan: Option<&serde_json::Value>, reset_residency: bool) -> Result<serde_json::Value,String> {
         self.device.bind_to_thread().map_err(|e|format!("switch CUDA context: {e:?}"))?;
         let sync=unsafe {cuda_sys::lib().cuCtxSynchronize()};
         if sync != cuda_sys::CUresult::CUDA_SUCCESS {return Err(format!("switch synchronize: {sync:?}"));}
         self.invalidate_cuda_graph();
+        let residency_reset=if reset_residency {Some(self.reset_live_residency()?)}else{None};
         let mut g=self.graph.take().ok_or("switch requires configured graph")?;
         let previous=g.live_switches;
         let previous_hash=crate::live_switches::hash(previous);
@@ -94,11 +152,17 @@ impl GpuDecodeStore {
             if let Some(receipt)=g.cpu_tail_calibration.as_mut() {receipt["switch_set_sha256"]=serde_json::json!(hash);receipt["optimisations"]=crate::live_switches::manifest(next);}
             g.mla_tensor=next.TENSOR_DECODE_ATTENTION();
             g.mla_split_exact=crate::optimisations::EXACT_ATTENTION;g.mla_split_unpack=crate::optimisations::EXACT_ATTENTION;
-            if next.COLD_EXPERT_PRUNING_FIVE()!=previous.COLD_EXPERT_PRUNING_FIVE() {
+            if next.COLD_EXPERT_PRUNING_FIVE()!=previous.COLD_EXPERT_PRUNING_FIVE()
+                || next.COLD_EXPERT_PRUNING_FOUR()!=previous.COLD_EXPERT_PRUNING_FOUR() {
                 g.adaptive_cold_drop=AdaptiveColdDropRuntime::from_selection(next);
             }
+            let promotion_payload=if next.STREAMED_COLD_PROMOTIONS() && g.streamed_cold.is_some() {
+                if next.STREAMED_COLD_PROMOTION_FITTED_PAYLOAD() {
+                    if g.hcs.as_ref().is_some_and(|h|h.soft_host_mode==HcsSoftHostMode::Source) {"fitted_device"}else{"disabled_host_mode"}
+                }else{"original_host"}
+            }else{"disabled"};
             Ok(serde_json::json!({"switch_set_sha256":hash,"optimisations":crate::live_switches::manifest(next),
-                "calibration_reused":reused,"calibration_seconds":start.elapsed().as_secs_f64(),
+                "compact_promotion_payload":promotion_payload,"calibration_reused":reused,"calibration_seconds":start.elapsed().as_secs_f64(),"residency_reset":residency_reset,
                 "cpu_calibration":g.cpu_tail_calibration,"actual_cpu_counts":g.cpu_tail_planned_counts,"shared_w13":format!("{:?}",g.ksplit_autotune),
                 "shared_w2":format!("{:?}",g.shared_w2_ksplit_autotune)}))
         })();
@@ -121,7 +185,7 @@ impl GpuDecodeStore {
         }
         let count=if crate::optimisations::CPU_MORE_WORKERS && crate::cpu_tail::compiled_lane_cpu_ids(3,4).is_ok(){4}else{2};
         let mut workers=(0..count).map(|i|CpuTailRuntime::new_live_compiled(g.hidden_size,g.moe_intermediate_size,g.group_size,i,count,next.CPU_INT8_K_MAJOR())).collect::<Result<Vec<_>,_>>()?;
-        let plan=crate::cpu_cold_lane::calibrate(&mut workers,&sources,g.max_experts_per_tok,g.streamed_cold.as_ref())?;
+        let plan=crate::cpu_cold_lane::calibrate(&mut workers,&sources,g.max_experts_per_tok,g.streamed_cold.as_ref(),next.CPU_INT8_DEPTH5_THREE())?;
         g.cpu_tail_planned_counts=plan.counts;g.cpu_tail_calibration=Some(plan.receipt);g.cpu_tail_workers=workers;
         Ok(())
     }
