@@ -13559,3 +13559,8 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 - Adopt CPU_K_MAJOR_READER by default: paired GLM-5.3 decode improves 112.240/113.298/115.833 to 105.837/106.265/107.832 ms/token at 3K/16K/65K. All complete logits and registered state match; fast-tier KL is zero and greedy agreement 100%, with task responses explicitly reused after equality. CPU partitions retain the same counts but loaded service improves by 8–15%. Other output-band widths keep the existing reader. Full ADQ remains deferred.
 
 - Adopt vector-scale CPU bands and complete CPU/GPU queue calibration as a default-on bundle after paired 3K/16K/65K decode gains (clean 103.574/105.031/106.466 to 102.360/103.676/104.467 ms/token; second 3K control excluded for compiler contention). Fast-tier KL is zero and complete logits/state match; CPU admission is unchanged. Independent compile switches retain both fallback paths. Full ADQ remains deferred.
+
+## 2026-11-11 — adopted bounded five-route pruning
+- Enable COLD_EXPERT_PRUNING_FIVE by default within the existing supported GLM registration guard; protect five of eight routes and cap omitted cold mass at25%. Other model/mode guards remain unchanged.
+- Interleaved5/3/3 ordinary samples:3K97.730->91.648,16K98.596->93.392,65K100.072->94.069ms/token; all paired signs improve. At65K9.993->10.631tok/s and inferred expert-demandH2D.932->.747GB/forward.
+- Expanded paired short screen passes with zero task losses/one gain,KL.01620,95.83%agreement; fullADQ remains deferred. Correct startup logging to show actual rank/mass policy. No release.
