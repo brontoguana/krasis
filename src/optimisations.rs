@@ -32,6 +32,7 @@ macro_rules! registry {
     }
 }
 registry! {
+    CPU_INT8_DEPTH5_THREE, false, "approximation", "Try a guarded third INT8 CPU expert at five-cold depth", &["CPU_INT8_K_MAJOR", "SHARED_EXPERT_COPY_OVERLAP", "CPU_FULL_QUEUE_PLANNER"];
     COLD_EXPERT_PRUNING_FOUR, false, "approximation", "Protect four routes with a 30 percent cold-mass ceiling", &["COLD_EXPERT_PRUNING_FIVE"];
     STREAMED_COLD_PROMOTIONS, false, "approximation", "Promote original host weights while retaining fitted cold staging", &["STREAMED_COLD_NF3"];
     CPU_INT8_K_MAJOR, false, "approximation", "INT8 activation dots in contiguous CPU cold reader bands", &["CPU_K_MAJOR_READER", "CPU_COLD_LANE"];

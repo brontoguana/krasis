@@ -122,7 +122,7 @@ impl GpuDecodeStore {
         }
         let count=if crate::optimisations::CPU_MORE_WORKERS && crate::cpu_tail::compiled_lane_cpu_ids(3,4).is_ok(){4}else{2};
         let mut workers=(0..count).map(|i|CpuTailRuntime::new_live_compiled(g.hidden_size,g.moe_intermediate_size,g.group_size,i,count,next.CPU_INT8_K_MAJOR())).collect::<Result<Vec<_>,_>>()?;
-        let plan=crate::cpu_cold_lane::calibrate(&mut workers,&sources,g.max_experts_per_tok,g.streamed_cold.as_ref())?;
+        let plan=crate::cpu_cold_lane::calibrate(&mut workers,&sources,g.max_experts_per_tok,g.streamed_cold.as_ref(),next.CPU_INT8_DEPTH5_THREE())?;
         g.cpu_tail_planned_counts=plan.counts;g.cpu_tail_calibration=Some(plan.receipt);g.cpu_tail_workers=workers;
         Ok(())
     }

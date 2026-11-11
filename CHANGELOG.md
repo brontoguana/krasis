@@ -13622,3 +13622,5 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 - Extend existing policy guard assertions for the new parameter set. Serving speed/quality and native compilation are pending; no adoption or saving claimed.
 
 - Emit a request-end expert-DMA counter in diagnostic live builds, including explicitly counted original-host promotion upgrades. Preserve zero normal-build logging overhead and all hot kernels. Profile totals remain separate because these counters exclude activation/metadata and out-of-boundary reload traffic.
+
+- Prepare default-off CPU_INT8_DEPTH5_THREE to test whether shared overlap can hide a third CPU expert at cold depth five. Require the measured3CPU/2GPU queue to remain within10%of this selection's own calibrated optimum and faster than GPU-only; retain the optimum and actual override in receipts. Restrict the existing INT8 reader geometry and preserve normal off paths. No speed or quality verdict yet.

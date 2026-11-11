@@ -104123,7 +104123,7 @@ impl GpuDecodeStore {
                         workers.push(CpuTailRuntime::new_compiled(graph.hidden_size,
                             graph.moe_intermediate_size,graph.group_size,index,worker_count)?);
                     }
-                    let mut plan=crate::cpu_cold_lane::calibrate(&mut workers,&sources,graph.max_experts_per_tok,graph.streamed_cold.as_ref())?;
+                    let mut plan=crate::cpu_cold_lane::calibrate(&mut workers,&sources,graph.max_experts_per_tok,graph.streamed_cold.as_ref(),crate::optimisations::CPU_INT8_DEPTH5_THREE)?;
                     let affinities=(0..worker_count).map(|i|crate::cpu_tail::compiled_lane_cpu_ids(i,worker_count)).collect::<Result<Vec<_>,_>>()?;
                     plan.receipt["cpu_ids"]=serde_json::json!(affinities);
                     plan.receipt["optimisations"]=serde_json::from_str(crate::optimisations::manifest()).map_err(|e|e.to_string())?;
