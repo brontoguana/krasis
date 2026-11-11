@@ -13589,3 +13589,6 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 - Prepare live-switches test build with per-engine selections, between-request control, graph/cache invalidation and calibration bound to effective manifests. Retain compile-time constants and compile-out overrides in normal builds. Startup reserves both attention launch workspaces; load-time weight layouts remain fixed. Speed parity, logits parity and lifecycle validation pending.
 
 - Add current-reader CPU_INT8_K_MAJOR behind a default-off switch, with live control dispatch once when constructing monomorphised persistent worker teams. Cache separate worker pools/calibration for each effective set; no per-dot runtime branch. Model speed and quality qualification pending.
+
+## 2026-11-11 — original-precision promotions with fitted staging
+- Prepare default-off STREAMED_COLD_PROMOTIONS on the cumulative fitted/pruning stack. Read original host payloads for resident upgrades, retain fitted demand staging, and count the extra promotion traffic. Live test dispatch is supported without additional loaded representations. End-to-end speed, fast tier and lifecycle qualification pending; no gain claimed.

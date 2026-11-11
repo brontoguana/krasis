@@ -32,6 +32,7 @@ macro_rules! registry {
     }
 }
 registry! {
+    STREAMED_COLD_PROMOTIONS, false, "approximation", "Promote original host weights while retaining fitted cold staging", &["STREAMED_COLD_NF3"];
     CPU_INT8_K_MAJOR, false, "approximation", "INT8 activation dots in contiguous CPU cold reader bands", &["CPU_K_MAJOR_READER", "CPU_COLD_LANE"];
     SHARED_EXPERT_COPY_OVERLAP, false, "exact", "Overlap shared expert projections with demand transfers", &[];
     COLD_EXPERT_PRUNING_FIVE, true, "approximation", "Protect five of eight routes with a 25 percent cold-mass ceiling", &["COLD_EXPERT_PRUNING_20"];

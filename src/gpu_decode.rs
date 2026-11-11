@@ -6487,7 +6487,10 @@ impl HcsState {
         promo: &DynamicHcsPromotion,
         stream: cuda_sys::CUstream,
         timing: bool,
+        original_host_source: bool,
     ) -> Result<bool, String> {
+        let original_host_source = (cfg!(feature = "live-switches") || crate::optimisations::STREAMED_COLD_PROMOTIONS)
+            && original_host_source;
         if !self.dynamic_enabled {
             return Ok(false);
         }
@@ -6634,32 +6637,39 @@ impl HcsState {
             }
         }
 
-        let copy_part = |dst_off: usize, src_off: usize, bytes: usize| -> Result<(), String> {
+        let copy_part = |dst_off: usize, src_off: usize, host: usize, bytes: usize| -> Result<(), String> {
             if bytes == 0 {
                 return Ok(());
             }
             let err = unsafe {
-                cuda_sys::lib().cuMemcpyDtoDAsync_v2(
-                    dst + dst_off as u64,
-                    promo.src_base + src_off as u64,
-                    bytes,
-                    stream,
-                )
+                if original_host_source {
+                    cuda_sys::lib().cuMemcpyHtoDAsync_v2(
+                        dst + dst_off as u64, host as *const std::ffi::c_void,
+                        bytes, stream,
+                    )
+                } else {
+                    cuda_sys::lib().cuMemcpyDtoDAsync_v2(
+                        dst + dst_off as u64,
+                        promo.src_base + src_off as u64,
+                        bytes,
+                        stream,
+                    )
+                }
             };
             if err == cuda_sys::CUresult::CUDA_SUCCESS {
                 Ok(())
             } else {
                 Err(format!(
-                    "cuMemcpyDtoDAsync_v2 dynamic HCS promotion: {:?}",
+                    "dynamic HCS promotion copy: {:?}",
                     err
                 ))
             }
         };
         let d2d_submit_start = timing.then(std::time::Instant::now);
-        copy_part(dst_w13p_off, promo.src_w13p_off, promo.w13p_bytes)?;
-        copy_part(dst_w13s_off, promo.src_w13s_off, promo.w13s_bytes)?;
-        copy_part(dst_w2p_off, promo.src_w2p_off, promo.w2p_bytes)?;
-        copy_part(dst_w2s_off, promo.src_w2s_off, promo.w2s_bytes)?;
+        copy_part(dst_w13p_off, promo.src_w13p_off, promo.w13p_host, promo.w13p_bytes)?;
+        copy_part(dst_w13s_off, promo.src_w13s_off, promo.w13s_host, promo.w13s_bytes)?;
+        copy_part(dst_w2p_off, promo.src_w2p_off, promo.w2p_host, promo.w2p_bytes)?;
+        copy_part(dst_w2s_off, promo.src_w2s_off, promo.w2s_host, promo.w2s_bytes)?;
         if let Some(start) = d2d_submit_start {
             self.dynamic_promotion_d2d_submit_s += start.elapsed().as_secs_f64();
         }
@@ -6747,6 +6757,7 @@ impl HcsState {
                 }));
             }
             Some(serde_json::json!({
+                "source_kind": if original_host_source { "original_host" } else { "staging_device" },
                 "promotion_stream_sync": format!("{:?}", sync_err),
                 "all_source_device_regions_match_resident": all_device_match,
                 "all_host_source_regions_match_resident": all_host_match,
@@ -72932,13 +72943,26 @@ impl GpuDecodeStore {
             }
             // Keep resident payloads at their original precision. Compact cold
             // staging must never become a resident source through promotion.
-            if (crate::optimisations::STREAMED_COLD_INT3 || crate::optimisations::STREAMED_COLD_NF3) && graph.streamed_cold.is_some() { dynamic_promotions.clear(); }
+            let compact_source = (crate::optimisations::STREAMED_COLD_INT3
+                || crate::optimisations::STREAMED_COLD_NF3) && graph.streamed_cold.is_some();
+            let original_host_promotions = graph.live_switches.STREAMED_COLD_PROMOTIONS()
+                && compact_source;
+            if compact_source && !original_host_promotions { dynamic_promotions.clear(); }
             if !dynamic_promotions.is_empty() {
                 let mut promoted = 0usize;
                 if let Some(ref mut hcs) = graph.hcs {
                     for promo in &dynamic_promotions {
-                        match hcs.dynamic_promote_from_device(promo, replay_stream, timing) {
-                            Ok(true) => promoted += 1,
+                        match hcs.dynamic_promote_from_device(promo, replay_stream, timing, original_host_promotions) {
+                            Ok(true) => {
+                                promoted += 1;
+                                if original_host_promotions {
+                                    // Include upgrade traffic; compact demand bytes alone
+                                    // would overstate the payload saving.
+                                    graph.dma_bytes_total += (promo.w13p_bytes + promo.w13s_bytes
+                                        + promo.w2p_bytes + promo.w2s_bytes) as u64;
+                                    graph.dma_call_count += 4;
+                                }
+                            },
                             Ok(false) => {}
                             Err(e) => {
                                 hcs.dynamic_copy_failures += 1;
@@ -99327,7 +99351,7 @@ impl GpuDecodeStore {
                             w2p_bytes: expert.w2_packed_bytes,
                             w2s_bytes: expert.w2_scales_bytes,
                         };
-                        hcs.dynamic_promote_from_device(&promotion, compute_stream, timing)
+                        hcs.dynamic_promote_from_device(&promotion, compute_stream, timing, false)
                             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
                     }
                 }
@@ -100596,7 +100620,7 @@ impl GpuDecodeStore {
                                 w2p_bytes: expert.w2_packed_bytes,
                                 w2s_bytes: expert.w2_scales_bytes,
                             };
-                            hcs.dynamic_promote_from_device(&promo, compute_stream, timing)
+                            hcs.dynamic_promote_from_device(&promo, compute_stream, timing, false)
                                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
                         }
                     }
