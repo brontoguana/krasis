@@ -6116,7 +6116,7 @@ impl WeightStore {
             (crate::optimisations::STREAMED_COLD_INT3, ".cold3"),
             (crate::optimisations::STREAMED_COLD_NF3, ".coldnf3"),
         ].into_iter().any(|(enabled, suffix)| {
-            if !enabled && !cfg!(feature = "live-switches") {return false;}
+            if !enabled {return false;}
             let mut companion = path.as_os_str().to_os_string();
             companion.push(suffix);
             std::path::PathBuf::from(companion).is_file()

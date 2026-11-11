@@ -13614,3 +13614,5 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 - Fast tier passes:KL0.018079,94.79%greedy agreement; JSON1/12→2/12,retrieval12/12 unchanged,coding3/12→1/12; pooled netloss1. Retain explicit switches and capability fallbacks. Batched normal-build confirmation is pending; full ADQ remains deferred.
 
 - Restack the unqualified promotion/live-format prototype on current cumulative defaults and capability/teardown guards. Request diagnostic compact identity only when its companion exists; leave normal unrelated cache loading unchanged. Native build and serving qualification remain pending.
+
+- Narrow the unqualified follow-up to original-precision promotions only; keep the already adopted fitted representation fixed at load time. Avoid adding unneeded format-switch ownership/calibration branches to this experiment. Existing resident and CPU weights provide the promotion source; no extra representation is allocated.
