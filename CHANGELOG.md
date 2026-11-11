@@ -13608,3 +13608,7 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 ## 2026-11-11 — adopt tensor/value bundle
 - Enable TENSOR_DECODE_ATTENTION, TENSOR_ABSORPTION and VALUE_REASSOCIATION as cumulative development defaults after request-interleaved paired speed gains:3K88.710→84.263,16K89.165→85.408,65K90.414→88.093ms/token; every paired sign improves. These are joint bundle measurements, not per-switch additive gains.
 - Fast tier passes:KL0.018079,94.79%greedy agreement; JSON1/12→2/12,retrieval12/12 unchanged,coding3/12→1/12; pooled netloss1. Retain explicit switches and capability fallbacks. Batched normal-build confirmation is pending; full ADQ remains deferred.
+
+## 2026-11-11 — adopt shared-expert copy overlap
+- Enable SHARED_EXPERT_COPY_OVERLAP as a cumulative development default after interleaved3K85.503→77.870,16K86.526→78.777,65K89.324→80.390ms/token; all paired samples favour it. Preserve existing capability/mode fallbacks and final reduction ordering.
+- Fast tier passes:KL0.006101,96.875%greedy agreement; JSON1/12 unchanged,retrieval12/12 unchanged,coding2/12→3/12. The candidate planner admits one additional CPU expert at queue depth six, so timings describe the whole build. Batched normal-build confirmation remains pending; no ADQ or release.
