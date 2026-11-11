@@ -172,9 +172,13 @@ impl AdaptiveColdDropRuntime {
     /// Fixed build-selected policy. Production activation is restricted to the
     /// supported GLM registration path; runtime environment cannot change it.
     pub(crate) fn from_compiled_policy() -> Self {
+        Self::from_selection(crate::optimisations::Selection::compiled())
+    }
+
+    pub(crate) fn from_selection(selection: crate::optimisations::Selection) -> Self {
         Self { stats: Some(ShadowPolicyStats::new(ColdDropPolicy {
-            protect_rank_fraction: if crate::optimisations::COLD_EXPERT_PRUNING_FIVE {0.625}else{0.75},
-            max_mass_fraction: if crate::optimisations::COLD_EXPERT_PRUNING_FIVE {0.25}else if crate::optimisations::COLD_EXPERT_PRUNING_20 {0.20} else if crate::optimisations::COLD_EXPERT_PRUNING_15 {0.15} else {0.10},
+            protect_rank_fraction: if selection.COLD_EXPERT_PRUNING_FIVE() {0.625}else{0.75},
+            max_mass_fraction: if selection.COLD_EXPERT_PRUNING_FIVE() {0.25}else if selection.COLD_EXPERT_PRUNING_20() {0.20} else if selection.COLD_EXPERT_PRUNING_15() {0.15} else {0.10},
         })) }
     }
 

@@ -1299,6 +1299,8 @@ fn drain_vram_pressure_for_state(
 }
 
 enum ModelRequest {
+    #[cfg(feature = "live-switches")]
+    LiveSwitches { stream: TcpStream, body: String },
     Chat { stream: TcpStream, body: String },
     SessionCacheStats { stream: TcpStream },
     SessionCacheTestPressure { stream: TcpStream, arm: bool },
@@ -1322,6 +1324,8 @@ struct FairModelScheduler {
     sender: mpsc::Sender<QueuedModelRequest>,
     next_ticket: Mutex<u64>,
     queued: AtomicUsize,
+    #[cfg(feature = "live-switches")]
+    outstanding: AtomicUsize,
 }
 
 impl FairModelScheduler {
@@ -1330,6 +1334,8 @@ impl FairModelScheduler {
             sender,
             next_ticket: Mutex::new(0),
             queued: AtomicUsize::new(0),
+            #[cfg(feature = "live-switches")]
+            outstanding: AtomicUsize::new(0),
         }
     }
 
@@ -1338,6 +1344,15 @@ impl FairModelScheduler {
             .next_ticket
             .lock()
             .map_err(|error| format!("model scheduler lock poisoned: {error}"))?;
+        #[cfg(feature = "live-switches")]
+        if matches!(&request, ModelRequest::LiveSwitches { .. }) && self.outstanding.load(Ordering::Acquire) != 0 {
+            if let ModelRequest::LiveSwitches { mut stream, .. } = request {
+                let _ = send_json(&mut stream, 409, r#"{"error":"cannot switch while a model request is in flight or queued"}"#);
+            }
+            return Err("model is busy".into());
+        }
+        #[cfg(feature = "live-switches")]
+        self.outstanding.fetch_add(1, Ordering::AcqRel);
         let ticket = *next;
         *next = next
             .checked_add(1)
@@ -1353,6 +1368,8 @@ impl FairModelScheduler {
             .is_err()
         {
             self.queued.fetch_sub(1, Ordering::AcqRel);
+            #[cfg(feature = "live-switches")]
+            self.outstanding.fetch_sub(1, Ordering::AcqRel);
             return Err("model worker is unavailable".to_string());
         }
         Ok(ticket)
@@ -1451,6 +1468,8 @@ fn handle_model_request(request: ModelRequest, state: &mut ServerState) {
         }
     }
     match request {
+        #[cfg(feature = "live-switches")]
+        ModelRequest::LiveSwitches {mut stream,body} => handle_live_switches(&mut stream,&body,state),
         ModelRequest::Chat { mut stream, body } => {
             handle_chat_completion(&mut stream, &body, state)
         }
@@ -1489,6 +1508,8 @@ fn reject_model_sequence(stream: &mut TcpStream, message: &str) {
 
 fn reject_model_request(request: ModelRequest, message: &str) {
     let mut stream = match request {
+        #[cfg(feature = "live-switches")]
+        ModelRequest::LiveSwitches {stream,..} => stream,
         ModelRequest::Chat { stream, .. }
         | ModelRequest::SessionCacheStats { stream }
         | ModelRequest::SessionCacheTestPressure { stream, .. }
@@ -1818,6 +1839,12 @@ fn handle_front_connection(
             }
         }
 
+        #[cfg(feature = "live-switches")]
+        ("POST", "/v1/internal/live-switches") => {
+            if test_endpoints && tcp_stream.peer_addr().is_ok_and(|a|a.ip().is_loopback()) {
+                let _ = scheduler.enqueue(ModelRequest::LiveSwitches {stream:tcp_stream,body:request.body});
+            } else { let _ = send_json(&mut tcp_stream,404,r#"{"error":"loopback diagnostic control only"}"#); }
+        }
         ("POST", path) if is_chat_completions_endpoint(path) => {
             if let Err(error) = scheduler.enqueue(ModelRequest::Chat {
                 stream: tcp_stream,
@@ -3468,6 +3495,14 @@ fn format_completion_with_debug(
 /// Requests without diagnostics retain exactly the original response bytes.
 fn attach_completion_debug(mut response: String, debug: Option<&serde_json::Value>) -> String {
     if let Some(debug_value) = debug {
+        #[cfg(feature = "live-switches")]
+        let live_debug = {
+            let mut v=debug_value.clone();
+            v["switch_set_sha256"]=serde_json::json!(crate::live_switches::active_hash());
+            v
+        };
+        #[cfg(feature = "live-switches")]
+        let debug_value=&live_debug;
         let closing_brace = response.pop();
         debug_assert_eq!(closing_brace, Some('}'));
         response.push_str(&format!(r#","krasis_debug":{}"#, debug_value));
@@ -9534,6 +9569,8 @@ impl RustServer {
                                     crate::vram_monitor::report_event("model_request_dispatch");
                                     handle_model_request(queued.request, &mut state);
                                 }
+                                #[cfg(feature = "live-switches")]
+                                worker_scheduler.outstanding.fetch_sub(1, Ordering::AcqRel);
                                 expected_ticket = expected_ticket.checked_add(1).unwrap_or_else(|| {
                                     log::error!("model scheduler worker ticket counter exhausted");
                                     u64::MAX
@@ -9570,6 +9607,8 @@ impl RustServer {
                             );
                             handle_model_request(queued.request, &mut state);
                         }
+                        #[cfg(feature = "live-switches")]
+                        worker_scheduler.outstanding.fetch_sub(1, Ordering::AcqRel);
                         expected_ticket = expected_ticket.checked_add(1).unwrap_or(u64::MAX);
                     }
 
@@ -11413,5 +11452,27 @@ mod tests {
             assert_eq!(engine.tool_call_format(), expected, "{template}");
             let _ = fs::remove_dir_all(dir);
         }
+    }
+}
+
+#[cfg(feature = "live-switches")]
+fn handle_live_switches(stream:&mut TcpStream,body:&str,state:&mut ServerState) {
+    let result=(|| -> Result<serde_json::Value,String> {
+        let next=crate::live_switches::parse(body)?;
+        if !state.aux_gpu_store_addrs.is_empty() || state.gpu_store_addr==0 {return Err("live harness requires one primary store".into());}
+        let mut engine=state.rust_prefill.lock().map_err(|e|e.to_string())?;
+        let engine=engine.as_mut().ok_or("native prefill engine is unavailable")?;
+        if let Some(ram)=state.session_cache.ram_store.as_mut() {ram.clear_for_live_switch()?;}
+        state.session_cache.active=None;
+        state.session_cache.prefill_samples.clear();state.session_cache.restore_samples.clear();
+        let store=unsafe {&mut *(state.gpu_store_addr as *mut GpuDecodeStore)};
+        let receipt=store.switch_live(next)?;
+        engine.live_switches=next;
+        crate::live_switches::set_active(next);
+        Ok(receipt)
+    })();
+    match result {
+        Ok(v)=>{let _=send_json(stream,200,&v.to_string());},
+        Err(e)=>{let _=send_json(stream,400,&serde_json::json!({"error":e}).to_string());},
     }
 }

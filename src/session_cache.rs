@@ -2032,6 +2032,13 @@ impl RamSessionStore {
         Ok(Some(snapshot))
     }
 
+    #[cfg(feature = "live-switches")]
+    pub(crate) fn clear_for_live_switch(&mut self) -> Result<(),String> {
+        if !self.reservations.is_empty() {return Err("live switch has pending RAM reservations".into());}
+        *self = Self::new(self.budget_fraction, self.probe.clone())?;
+        Ok(())
+    }
+
     pub fn stats(&self) -> RamSessionStoreStats {
         let snapshot_bytes = self.snapshot_bytes();
         let index_bytes = self.metadata_heap_bytes();

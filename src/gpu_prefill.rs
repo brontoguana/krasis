@@ -11479,6 +11479,7 @@ fn select_prefill_pinning_experts(
 }
 
 pub struct PrefillEngine {
+    pub(crate) live_switches: crate::optimisations::Selection,
     #[cfg(feature = "scalar-gdn-test")]
     pub(crate) selected_scalar_gdn: Option<Arc<crate::scalar_gdn_runtime::Storage>>,
     pub(crate) selected_kda: Option<Arc<crate::kda_prefix_owner::KdaEngineRequestStorage>>,
@@ -41082,7 +41083,7 @@ impl PrefillEngine {
         if split_candidate && preparation != KdaSplitPreparation::Bf16QkBeta {
             return Err("KDA relay requires KRASIS_GLM53_KDA_SPLIT_PREPARATION=bf16_qk_beta; raw and bf16_beta experiments have been retired".into());
         }
-        let relay = split_candidate && crate::optimisations::KDA_RELAY;
+        let relay = split_candidate && self.live_switches.KDA_RELAY();
         if relay {
             // Reuse the exact ordinary preparation operator and its BF16 stores.
             let mut a0=q;let mut a1=k;let mut a2=beta;let mut a3=tokens;let mut a4=heads;let mut a5=dim;
@@ -46291,7 +46292,7 @@ impl PrefillEngine {
         &self, output: u64, query: u64, weight: u64, rows: usize,
         heads: usize, qk: usize, nope: usize, cache: usize,
     ) -> Result<bool, String> {
-        let mode = if crate::optimisations::TENSOR_ABSORPTION { 1 } else if crate::optimisations::ORDERED_ABSORPTION { 2 } else { 0 };
+        let mode = if self.live_switches.TENSOR_ABSORPTION() { 1 } else if crate::optimisations::ORDERED_ABSORPTION { 2 } else { 0 };
         if !matches!(mode, 1 | 2) || rows < 128
             || (heads, qk, nope, cache) != (64, 256, 256, 512)
         { return Ok(false); }
@@ -46448,7 +46449,7 @@ impl PrefillEngine {
         }
 
         let requested = crate::optimisations::PREFILL_F32;
-        let reassociated_value = crate::optimisations::VALUE_REASSOCIATION;
+        let reassociated_value = self.live_switches.VALUE_REASSOCIATION();
         let fused_mask=requested&&rows>=32&&prefill_mla_f32_geometry(self.kv_format,num_heads,nope_dim,rope_dim,ckv_cache_dim,selected.selected_per_row,sm_scale)
             &&dsa_mla_gathered_compute_mode()?==DsaMlaGatheredComputeMode::Pedantic;
         let workspace = self

@@ -13,6 +13,9 @@
 //! into the CUDA module at init time.
 
 mod memory_audit;
+mod shared_expert_overlap;
+#[cfg(feature = "live-switches")]
+mod live_switches;
 
 use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -18860,6 +18863,9 @@ struct GpuDecodeGraph {
     d_mla_attn_out: cudarc::driver::CudaSlice<f32>, // [num_heads * kv_lora_rank] attention output
     // Packed rows, compact indices and count; allocated before graph capture.
     mla_selected_stage: Option<(CudaSlice<u8>, CudaSlice<i32>, CudaSlice<i32>)>,
+    live_switches: crate::optimisations::Selection,
+    #[cfg(feature = "live-switches")]
+    live_calibrations: std::collections::HashMap<String, live_switches::Calibration>,
     mla_split_workspace: Option<CudaSlice<f32>>,
     mla_split_exact: bool,
     mla_split_unpack: bool,
@@ -32468,6 +32474,9 @@ impl GpuDecodeStore {
             mla_split_workspace: None,
             mla_split_exact: false,
             mla_split_unpack: false,
+            live_switches: crate::optimisations::Selection::compiled(),
+            #[cfg(feature = "live-switches")]
+            live_calibrations: std::collections::HashMap::new(),
             mla_tensor: false,
             mla_pair_capture: None,
             mla_sparse_attention_threads,
@@ -40273,7 +40282,7 @@ impl GpuDecodeStore {
     fn finalize_dsa_indexer_resources(&mut self) -> PyResult<usize> {
         // Allocate before calibration/capture. One owner is shared by serial
         // main-stream MLA layers; no graph replay may outlive this graph.
-        let split_mode = if crate::optimisations::TENSOR_DECODE_ATTENTION { "5" } else if crate::optimisations::EXACT_ATTENTION { "3" } else { "0" }.to_string();
+        let split_mode = if cfg!(feature = "live-switches") || crate::optimisations::TENSOR_DECODE_ATTENTION { "5" } else if crate::optimisations::EXACT_ATTENTION { "3" } else { "0" }.to_string();
         if matches!(split_mode.as_str(), "1" | "2" | "3" | "5" | "6") {
             let graph = self.graph.as_ref().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Call configure first"))?;
             if graph.dsa_indexer_resources_finalized {
@@ -40291,7 +40300,7 @@ impl GpuDecodeStore {
                 }
             }
             let tensor = tensor && major >= 8;
-            let unpack = split_mode == "3";
+            let unpack = split_mode == "3" || cfg!(feature = "live-switches");
             let exact = unpack || split_mode == "2";
             let mut elements = 0usize;
             if graph.kv_format == 7 {
@@ -40307,6 +40316,7 @@ impl GpuDecodeStore {
                                 .and_then(|x| num_heads.checked_mul(cap.div_ceil(128)).and_then(|n| n.checked_mul(512)).and_then(|n| x.checked_add(n)))
                         } else if exact { num_heads.checked_add(if unpack { *ckv_cache_dim } else { 0 }).and_then(|x| x.checked_mul(cap)) } else { num_heads.checked_mul(cap.div_ceil(128)).and_then(|x| x.checked_mul(ckv_cache_dim + 2)) }
                             .ok_or_else(|| pyo3::exceptions::PyOverflowError::new_err("MLA split workspace overflow"))?;
+                        let required = if cfg!(feature = "live-switches") { required.max((num_heads + ckv_cache_dim) * cap) } else { required };
                         elements = elements.max(required);
                     }
                 }
@@ -40316,7 +40326,7 @@ impl GpuDecodeStore {
                 self.graph.as_mut().unwrap().mla_split_workspace = Some(workspace);
                 self.graph.as_mut().unwrap().mla_split_exact = exact;
                 self.graph.as_mut().unwrap().mla_split_unpack = unpack;
-                self.graph.as_mut().unwrap().mla_tensor = tensor;
+                self.graph.as_mut().unwrap().mla_tensor = tensor && crate::optimisations::TENSOR_DECODE_ATTENTION;
                 log::info!("MLA K6 split graph-owned workspace: {} bytes", elements * 4);
             }
             if split_mode == "6" {
@@ -51302,10 +51312,10 @@ impl GpuDecodeStore {
         capacity: usize, seq_len: i32, seq_pointer: u64,
         ckv: u64, kpe: u64, indices: u64, scale: f32,
     ) -> Result<bool, String> {
-        if !crate::optimisations::EXACT_ATTENTION && !crate::optimisations::TENSOR_DECODE_ATTENTION {
+        if !crate::optimisations::EXACT_ATTENTION && !graph.live_switches.TENSOR_DECODE_ATTENTION() {
             return Ok(false);
         }
-        let tensor = crate::optimisations::TENSOR_DECODE_ATTENTION && graph.mla_tensor;
+        let tensor = graph.live_switches.TENSOR_DECODE_ATTENTION() && graph.mla_tensor;
         let unpack = crate::optimisations::EXACT_ATTENTION && graph.mla_split_unpack;
         let exact = crate::optimisations::EXACT_ATTENTION && graph.mla_split_exact;
         if graph.kv_format != 7 || dim != 512 || !matches!(rope, 0 | 64) || capacity == 0 {
@@ -55353,6 +55363,7 @@ impl GpuDecodeStore {
         )?;
         // END bounded model KDA diagnostic startup
         let mut engine = PrefillEngine {
+            live_switches: crate::optimisations::Selection::compiled(),
             #[cfg(feature = "scalar-gdn-test")]
             selected_scalar_gdn: None,
             selected_kda: None,
@@ -61842,6 +61853,10 @@ impl GpuDecodeStore {
                                     "common-shared-w13-single-kernel-no-separate-reduction-end",
                                 )?;
                             }
+                        } else if shared_expert_overlap::enabled(graph, layer_idx) {
+                            // Both shared projections ran before the demand
+                            // wait. Keep W2's reduction/addition below, after
+                            // routed accumulation, with unchanged partials.
                         } else if use_v2_w13 {
                             self.launch_marlin_gemv_v2(
                                 sw13p,
@@ -61974,23 +61989,25 @@ impl GpuDecodeStore {
                         } else if let Some(w2_ksplits) =
                             select_shared_w2_ksplits(graph, shared_intermediate, hs, shared_is_int8)
                         {
-                            self.launch_fused_silu_accum_v2(
-                                sw2p,
-                                sw2s,
-                                *graph.d_expert_gate_up.device_ptr(),
-                                partial_ptr,
-                                shared_inv_wp,
-                                inv_sp,
-                                shared_intermediate,
-                                hs,
-                                gs,
-                                w2_ksplits,
-                                moe.shared_swiglu_limit,
-                                if moe.deepseek_v4_activation { 2 } else { 0 },
-                                &k,
-                                shared_is_int8,
-                            )
-                            .map_err(|e| format!("shared silu_accum v2: {:?}", e))?;
+                            if !shared_expert_overlap::enabled(graph, layer_idx) {
+                                self.launch_fused_silu_accum_v2(
+                                    sw2p,
+                                    sw2s,
+                                    *graph.d_expert_gate_up.device_ptr(),
+                                    partial_ptr,
+                                    shared_inv_wp,
+                                    inv_sp,
+                                    shared_intermediate,
+                                    hs,
+                                    gs,
+                                    w2_ksplits,
+                                    moe.shared_swiglu_limit,
+                                    if moe.deepseek_v4_activation { 2 } else { 0 },
+                                    &k,
+                                    shared_is_int8,
+                                )
+                                .map_err(|e| format!("shared silu_accum v2: {:?}", e))?;
+                            }
                             self.launch_reduce_ksplits_sigmoid_accum(
                                 shared_accum_ptr,
                                 partial_ptr,
@@ -72133,6 +72150,9 @@ impl GpuDecodeStore {
                 .copied()
             {
                 Self::capture_route_consumers(graph, layer, position, "pre_hot", replay_stream)?;
+            }
+            if graph.live_switches.SHARED_EXPERT_COPY_OVERLAP() && graph_idx > 0 {
+                shared_expert_overlap::launch(graph, moe_indices[graph_idx - 1])?;
             }
             // Split launch: compute hot/staged experts on the replay stream now,
             // before the cold-DMA wait, so hot compute overlaps demand DMA.

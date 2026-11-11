@@ -1,4 +1,6 @@
 pub mod optimisations;
+#[cfg(feature = "live-switches")]
+mod live_switches;
 pub mod adaptive_cold_drop;
 mod bf16_row_projection;
 mod capture_phase;

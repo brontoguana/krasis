@@ -6,12 +6,33 @@ macro_rules! registry {
         pub const $name: bool = match option_env!(concat!("KRASIS_OPT_", stringify!($name))) {
             Some(value) => value.as_bytes()[0] == b'1', None => $default,
         };)*
+        /// Per-engine selection. Non-test builds retain constant dispatch and zero storage.
+        #[derive(Clone, Copy, Debug)]
+        #[allow(non_snake_case)]
+        pub struct Selection { $(#[cfg(feature = "live-switches")] pub $name: bool,)* }
+        impl Selection {
+            pub const fn compiled() -> Self { Self { $(#[cfg(feature = "live-switches")] $name: $name,)* } }
+            $(#[inline(always)] #[allow(non_snake_case)]
+            pub fn $name(&self) -> bool {
+                #[cfg(feature = "live-switches")] { self.$name }
+                #[cfg(not(feature = "live-switches"))] { $name }
+            })*
+            #[cfg(feature = "live-switches")]
+            pub fn set(&mut self, name: &str, enabled: bool) -> Result<(), String> {
+                match name { $(stringify!($name) => self.$name = enabled,)*
+                    _ => return Err(format!("unknown optimisation: {name}")), }
+                Ok(())
+            }
+            #[cfg(feature = "live-switches")]
+            pub fn values(&self) -> Vec<(&'static str, bool)> { vec![$((stringify!($name), self.$name),)*] }
+        }
         pub const ENTRIES: &[(&str, bool, &str, &str, &[&str])] = &[
             $((stringify!($name), $default, $kind, $description, $requires),)*
         ];
     }
 }
 registry! {
+    SHARED_EXPERT_COPY_OVERLAP, false, "exact", "Overlap shared expert projections with demand transfers", &[];
     COLD_EXPERT_PRUNING_FIVE, true, "approximation", "Protect five of eight routes with a 25 percent cold-mass ceiling", &["COLD_EXPERT_PRUNING_20"];
     STREAMED_COLD_NF3, true, "approximation", "Layer-fitted three-bit codebooks for streamed cold experts", &[];
     STREAMED_COLD_INT3, false, "approximation", "Three-bit streamed cold weights with unchanged resident and CPU weights", &[];
