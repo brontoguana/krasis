@@ -25,7 +25,7 @@ impl Calibration {
     }
 }
 impl GpuDecodeStore {
-    pub(crate) fn switch_live(&mut self, next: crate::optimisations::Selection) -> Result<serde_json::Value,String> {
+    pub(crate) fn switch_live(&mut self, next: crate::optimisations::Selection, execution_plan: Option<&serde_json::Value>) -> Result<serde_json::Value,String> {
         self.device.bind_to_thread().map_err(|e|format!("switch CUDA context: {e:?}"))?;
         let sync=unsafe {cuda_sys::lib().cuCtxSynchronize()};
         if sync != cuda_sys::CUresult::CUDA_SUCCESS {return Err(format!("switch synchronize: {sync:?}"));}
@@ -58,6 +58,37 @@ impl GpuDecodeStore {
                     false
                 }
             };
+            if let Some(plan)=execution_plan {
+                // Freeze decisions, never relabel the measured calibration costs.
+                let plan_hash=plan.get("switch_set_sha256").and_then(|x|x.as_str()).ok_or("execution plan lacks switch hash")?;
+                if plan_hash != hash {return Err("execution plan belongs to another switch set".into());}
+                let geometry=serde_json::json!({"hidden":g.hidden_size,"intermediate":g.moe_intermediate_size,"group_size":g.group_size});
+                if plan.get("geometry") != Some(&geometry) {return Err("execution plan geometry mismatch".into());}
+                let counts=plan.get("cpu_counts").and_then(|x|x.as_array()).ok_or("execution plan lacks CPU counts")?;
+                let counts=counts.iter().map(|x|x.as_u64().map(|x|x as usize).ok_or("invalid CPU count".to_string())).collect::<Result<Vec<_>,_>>()?;
+                if counts.len()!=g.max_experts_per_tok+1 || counts.iter().enumerate().any(|(depth,&n)|n>depth || n>g.cpu_tail_workers.len()) {
+                    return Err("execution plan CPU counts exceed existing workers or routes".into());
+                }
+                let affinities=(0..g.cpu_tail_workers.len()).map(|i|crate::cpu_tail::compiled_lane_cpu_ids(i,g.cpu_tail_workers.len())).collect::<Result<Vec<_>,_>>()?;
+                if plan.get("cpu_ids") != Some(&serde_json::json!(affinities)) {return Err("execution plan CPU topology mismatch".into());}
+                let w2=plan.get("shared_w2").and_then(|x|x.as_array()).ok_or("execution plan lacks shared W2 selections")?;
+                let mut choices=Vec::new();
+                for row in w2 {
+                    let k=row.get("k").and_then(|x|x.as_u64()).ok_or("missing shared k")? as usize;
+                    let n=row.get("n").and_then(|x|x.as_u64()).ok_or("missing shared n")? as usize;
+                    let int8=row.get("int8").and_then(|x|x.as_bool()).ok_or("missing shared format")?;
+                    let splits=row.get("splits").and_then(|x|x.as_u64()).ok_or("missing shared splits")? as usize;
+                    if !g.shared_w2_ksplit_autotune.contains_key(&(k,n,int8)) || ![2,4,8].contains(&splits) || k % splits != 0 {
+                        return Err("shared W2 plan is not an admitted calibrated shape/launch".into());
+                    }
+                    choices.push(((k,n,int8),splits));
+                }
+                g.cpu_tail_planned_counts=counts;
+                for (shape,choice) in choices {g.shared_w2_ksplit_autotune.insert(shape,choice);}
+                if let Some(receipt)=g.cpu_tail_calibration.as_mut() {
+                    receipt["diagnostic_execution_plan"]=plan.clone();
+                }
+            }
             g.live_switches=next;
             if let Some(receipt)=g.cpu_tail_calibration.as_mut() {receipt["switch_set_sha256"]=serde_json::json!(hash);receipt["optimisations"]=crate::live_switches::manifest(next);}
             g.mla_tensor=next.TENSOR_DECODE_ATTENTION();
@@ -67,7 +98,7 @@ impl GpuDecodeStore {
             }
             Ok(serde_json::json!({"switch_set_sha256":hash,"optimisations":crate::live_switches::manifest(next),
                 "calibration_reused":reused,"calibration_seconds":start.elapsed().as_secs_f64(),
-                "cpu_calibration":g.cpu_tail_calibration,"shared_w13":format!("{:?}",g.ksplit_autotune),
+                "cpu_calibration":g.cpu_tail_calibration,"actual_cpu_counts":g.cpu_tail_planned_counts,"shared_w13":format!("{:?}",g.ksplit_autotune),
                 "shared_w2":format!("{:?}",g.shared_w2_ksplit_autotune)}))
         })();
         self.graph=Some(g);
