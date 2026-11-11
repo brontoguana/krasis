@@ -88,7 +88,7 @@ impl Runtime {
         // default-stream zeroing operation racing the nonblocking copy stream.
         let scratch=unsafe{device.alloc::<u8>(compact_bytes)}.map_err(|e|e.to_string())?;
         let mut words=[0u32;4];for i in 0..4 {words[i]=u32::try_from(sizes[i]/4).map_err(|_|"cold tier word count overflow")?;}
-        eprintln!("STREAMED COLD INT3 experts={count} raw_bytes={} compact_bytes={compact_bytes} resident=original cpu=original promotions=frozen nf3={nf3}",sizes.iter().sum::<usize>());
+        eprintln!("STREAMED COLD INT3 experts={count} raw_bytes={} compact_bytes={compact_bytes} resident=original cpu=original promotions=effective_switch_policy nf3={nf3}",sizes.iter().sum::<usize>());
         Ok(Self{device:Arc::clone(device),segments,locations,ordinals,scratch,function,words,compact_bytes,codebooks,experts_per_layer})
     }
     pub(crate) fn payload_bytes(&self) -> usize { self.compact_bytes }
