@@ -11459,6 +11459,7 @@ mod tests {
 fn handle_live_switches(stream:&mut TcpStream,body:&str,state:&mut ServerState) {
     let result=(|| -> Result<serde_json::Value,String> {
         let next=crate::live_switches::parse(body)?;
+        require_model_sequence_ready(state)?;
         if !state.aux_gpu_store_addrs.is_empty() || state.gpu_store_addr==0 {return Err("live harness requires one primary store".into());}
         let mut engine=state.rust_prefill.lock().map_err(|e|e.to_string())?;
         let engine=engine.as_mut().ok_or("native prefill engine is unavailable")?;
@@ -11466,7 +11467,8 @@ fn handle_live_switches(stream:&mut TcpStream,body:&str,state:&mut ServerState) 
         state.session_cache.active=None;
         state.session_cache.prefill_samples.clear();state.session_cache.restore_samples.clear();
         let store=unsafe {&mut *(state.gpu_store_addr as *mut GpuDecodeStore)};
-        let receipt=store.switch_live(next)?;
+        let request:serde_json::Value=serde_json::from_str(body).map_err(|e|e.to_string())?;
+        let receipt=store.switch_live(next,request.get("execution_plan"))?;
         engine.live_switches=next;
         crate::live_switches::set_active(next);
         Ok(receipt)

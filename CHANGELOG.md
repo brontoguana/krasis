@@ -13594,3 +13594,23 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 - Prepare default-off STREAMED_COLD_PROMOTIONS on the cumulative fitted/pruning stack. Read original host payloads for resident upgrades, retain fitted demand staging, and count the extra promotion traffic. Live test dispatch is supported without additional loaded representations. End-to-end speed, fast tier and lifecycle qualification pending; no gain claimed.
 
 - Prepare live fitted/original selection using representations already required for original CPU/resident weights and fitted demand staging. No extra model backing is loaded. Change transfer dispatch and queue calibration together and invalidate cached model state; normal builds retain compile-out paths. This extension is not yet compiled or measured. Host repacking still requires a separate loaded layout.
+## 2026-11-11 — controlled diagnostic parity
+- Add test-build-only replay of execution decisions for parity: validate switch hash, geometry, worker affinities/count bounds and shared-W2 launch shapes. Preserve freshly measured costs and original plan provenance separately. Natural normal/test startups selected different CPU depth-five counts and shared-W2 splits, so their bit comparisons do not isolate dispatch. Kernel and normal-build execution code are unchanged. Controlled parity remains pending.
+
+## 2026-11-11 — avoid unrelated compact-tier startup work
+- Request a compact-tier routed-source hash only for a selected four-bit cache with its matching companion artifact present. Preserve full original-source hashing/verification for the active GLM tier and explicit expert-compression sidecars. Other models without compact artifacts retain their previous load path; missing or concurrently added compact artifacts still fail closed at runtime. No inference arithmetic changes.
+
+- Preserve normal GLM startup when its optional compact companion has not been prepared: retain original weights and explicitly report inactive compact staging. Existing but invalid companions still fail integrity validation. Benchmark launchers must require actual compact activation before scoring that treatment. Automatic companion preparation remains outside this development qualification.
+
+- Apply the same availability fallback to supported GLM loads without a persistent cache identity; keep non-cache modes usable. Clarify that existing companion integrity failures remain fatal and benchmark activation is mandatory.
+
+## 2026-11-11 — retain capability and mode fallbacks
+- Preserve accepted exact K6 attention when tensor geometry is unsupported: allocate per-layer fallback workspace and select tensor launches only for admitted rope/head/capacity shapes. The qualified GLM tensor branch is unchanged. Retain original shared execution for unqualified peer/predictor/repacking/compression modes. Candidate defaults remain off pending the running fast tier; no new speed gain claimed.
+
+- Complete diagnostic ownership teardown: join cached CPU worker pools alongside the active pool before graph buffers are released. Reject live control when the ordinary sequence-state readiness guard reports pending recovery. These control/teardown guards leave normal builds and measured hot arithmetic unchanged.
+
+## 2026-11-11 — adopt tensor/value bundle
+- Enable TENSOR_DECODE_ATTENTION, TENSOR_ABSORPTION and VALUE_REASSOCIATION as cumulative development defaults after request-interleaved paired speed gains:3K88.710→84.263,16K89.165→85.408,65K90.414→88.093ms/token; every paired sign improves. These are joint bundle measurements, not per-switch additive gains.
+- Fast tier passes:KL0.018079,94.79%greedy agreement; JSON1/12→2/12,retrieval12/12 unchanged,coding3/12→1/12; pooled netloss1. Retain explicit switches and capability fallbacks. Batched normal-build confirmation is pending; full ADQ remains deferred.
+
+- Restack the unqualified promotion/live-format prototype on current cumulative defaults and capability/teardown guards. Request diagnostic compact identity only when its companion exists; leave normal unrelated cache loading unchanged. Native build and serving qualification remain pending.

@@ -21563,6 +21563,8 @@ impl Drop for GpuDecodeGraph {
                 );
             }
             if crate::optimisations::CPU_COLD_LANE {self.cpu_tail_workers.clear();}
+            #[cfg(feature = "live-switches")]
+            self.live_calibrations.clear();
             self.per_layer_graphs.clear();
             drop(self.hot_hcs_full_graph.take());
         }
@@ -40311,16 +40313,16 @@ impl GpuDecodeStore {
                 }
             }
             let tensor = tensor && major >= 8;
-            let unpack = split_mode == "3" || cfg!(feature = "live-switches");
+            let unpack = split_mode == "3" || cfg!(feature = "live-switches") || crate::optimisations::EXACT_ATTENTION;
             let exact = unpack || split_mode == "2";
             let mut elements = 0usize;
             if graph.kv_format == 7 {
                 for layer in &graph.layers {
                     if let (Some(reg), GpuAttnConfig::MLA { num_heads, ckv_cache_dim, qk_rope_dim, .. }) = (&layer.dsa_indexer, &layer.attn) {
-                        if *ckv_cache_dim != 512 || !matches!(*qk_rope_dim, 0 | 64) || (tensor && (*qk_rope_dim != 0 || num_heads % 16 != 0)) { continue; }
+                        if *ckv_cache_dim != 512 || !matches!(*qk_rope_dim, 0 | 64) { continue; }
                         let cap = graph.dsa_indexer_owners.iter().filter(|x| x.owner_layer_idx == reg.owner_layer_idx).map(|x| x.topk_capacity)
                             .chain(graph.dsa_indexshare_replicas.iter().filter(|x| x.owner_layer_idx == reg.owner_layer_idx).map(|x| x.topk_capacity)).max().unwrap_or(0);
-                        if tensor && cap > 4096 { continue; }
+                        let tensor = tensor && *qk_rope_dim == 0 && num_heads % 16 == 0 && cap <= 4096;
                         let required = if tensor {
                             let padded = cap.checked_add(15).map(|x| x / 16 * 16).ok_or_else(|| pyo3::exceptions::PyOverflowError::new_err("MLA padding overflow"))?;
                             num_heads.checked_mul(2).and_then(|x| x.checked_add(512)).and_then(|x| x.checked_mul(padded))
@@ -51326,7 +51328,8 @@ impl GpuDecodeStore {
         if !crate::optimisations::EXACT_ATTENTION && !graph.live_switches.TENSOR_DECODE_ATTENTION() {
             return Ok(false);
         }
-        let tensor = graph.live_switches.TENSOR_DECODE_ATTENTION() && graph.mla_tensor;
+        let tensor = graph.live_switches.TENSOR_DECODE_ATTENTION() && graph.mla_tensor
+            && rope == 0 && heads % 16 == 0 && capacity <= 4096;
         let unpack = crate::optimisations::EXACT_ATTENTION && graph.mla_split_unpack;
         let exact = crate::optimisations::EXACT_ATTENTION && graph.mla_split_exact;
         if graph.kv_format != 7 || dim != 512 || !matches!(rope, 0 | 64) || capacity == 0 {
@@ -51334,7 +51337,6 @@ impl GpuDecodeStore {
         }
         let Some(workspace) = &graph.mla_split_workspace else { return Ok(false); };
         let splits = capacity.div_ceil(128);
-        if tensor && (rope != 0 || heads % 16 != 0 || capacity > 4096) { return Ok(false); }
         let padded = capacity.checked_add(15).ok_or("MLA padded capacity overflow")? / 16 * 16;
         let required = if tensor {
             heads.checked_mul(2).and_then(|x| x.checked_add(512)).and_then(|x| x.checked_mul(padded))
@@ -102814,6 +102816,16 @@ impl GpuDecodeStore {
             || self.draft.is_some() || self.dspark.is_some() {
             eprintln!("STREAMED COLD INT3 fallback: unsupported execution mode"); return Ok(());
         }
+        let Some(identity)=store.gpu_cache_identity.as_ref() else {
+            eprintln!("STREAMED COLD inactive: no cache identity; retaining original weights");
+            return Ok(());
+        };
+        let mut companion=identity.path.as_os_str().to_os_string();
+        companion.push(if crate::optimisations::STREAMED_COLD_NF3 {".coldnf3"}else{".cold3"});
+        if !std::path::Path::new(&companion).exists() {
+            eprintln!("STREAMED COLD inactive: compact companion is absent; retaining original weights");
+            return Ok(());
+        }
         let attempt=(||->Result<_,String>{
             let identity=store.gpu_cache_identity.as_ref().ok_or("cold tier requires source identity")?;
             let mut ordinals=std::collections::HashMap::new();let mut geometry=None;
@@ -102833,8 +102845,8 @@ impl GpuDecodeStore {
             let function=unsafe{function.cu_function()};
             crate::streamed_cold::Runtime::new(&self.device,identity,geometry.ok_or("cold tier has no experts")?,ordinals,count,function,cfg!(feature = "live-switches") || crate::optimisations::STREAMED_COLD_NF3)
         })();
-        // An explicitly enabled experimental treatment must fail visibly when
-        // its artifact is missing; never mislabel fallback as a measured tier.
+        // Existing companions must pass integrity checks. Availability
+        // fallbacks above are explicit; benchmarks require actual activation.
         graph.streamed_cold=Some(attempt.map_err(pyo3::exceptions::PyRuntimeError::new_err)?);
         Ok(())
     }

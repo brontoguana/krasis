@@ -54,9 +54,9 @@ registry! {
     INDEXER_QUERY_TILE, true, "exact", "Fixed row indexer query projection tiles", &[];
     INDEX_SCORE_ROW_BANDS, true, "exact", "Causal index score row bands", &[];
     INDEX_RADIX_TOPK, true, "exact", "Radix index selection", &[];
-    VALUE_REASSOCIATION, false, "approximation", "Reassociate prefill value contraction", &["PREFILL_F32"];
-    TENSOR_DECODE_ATTENTION, false, "approximation", "Tensor sparse decode attention", &[];
-    TENSOR_ABSORPTION, false, "approximation", "Tensor sparse query absorption", &[];
+    VALUE_REASSOCIATION, true, "approximation", "Reassociate prefill value contraction", &["PREFILL_F32"];
+    TENSOR_DECODE_ATTENTION, true, "approximation", "Tensor sparse decode attention", &[];
+    TENSOR_ABSORPTION, true, "approximation", "Tensor sparse query absorption", &[];
     KDA_RELAY, true, "exact", "Pipelined two-warp prepared GLM-5.3 KDA recurrence", &[];
 }
 /// Stable manifest copied into receipts and printed at process startup.
