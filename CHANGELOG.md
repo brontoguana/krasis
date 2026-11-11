@@ -13599,3 +13599,6 @@ Validated the cumulative defaults on A6000 with frozen 3K/16K/65K requests: comp
 - Preserve normal GLM startup when its optional compact companion has not been prepared: retain original weights and explicitly report inactive compact staging. Existing but invalid companions still fail integrity validation. Benchmark launchers must require actual compact activation before scoring that treatment. Automatic companion preparation remains outside this development qualification.
 
 - Apply the same availability fallback to supported GLM loads without a persistent cache identity; keep non-cache modes usable. Clarify that existing companion integrity failures remain fatal and benchmark activation is mandatory.
+
+## 2026-11-11 — retain capability and mode fallbacks
+- Preserve accepted exact K6 attention when tensor geometry is unsupported: allocate per-layer fallback workspace and select tensor launches only for admitted rope/head/capacity shapes. The qualified GLM tensor branch is unchanged. Retain original shared execution for unqualified peer/predictor/repacking/compression modes. Candidate defaults remain off pending the running fast tier; no new speed gain claimed.

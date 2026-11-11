@@ -93,7 +93,7 @@ impl GpuDecodeStore {
             g.live_switches=next;
             if let Some(receipt)=g.cpu_tail_calibration.as_mut() {receipt["switch_set_sha256"]=serde_json::json!(hash);receipt["optimisations"]=crate::live_switches::manifest(next);}
             g.mla_tensor=next.TENSOR_DECODE_ATTENTION();
-            g.mla_split_exact=!g.mla_tensor;g.mla_split_unpack=!g.mla_tensor;
+            g.mla_split_exact=crate::optimisations::EXACT_ATTENTION;g.mla_split_unpack=crate::optimisations::EXACT_ATTENTION;
             if next.COLD_EXPERT_PRUNING_FIVE()!=previous.COLD_EXPERT_PRUNING_FIVE() {
                 g.adaptive_cold_drop=AdaptiveColdDropRuntime::from_selection(next);
             }

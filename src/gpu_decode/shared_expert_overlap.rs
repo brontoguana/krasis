@@ -15,6 +15,10 @@ pub(super) fn enabled(graph: &GpuDecodeGraph, layer: usize) -> bool {
         && graph.split_expert_launch
         && !graph.gpu_route_sync
         && !graph.mapped_reads_active
+        && graph.peer_experts.is_empty()
+        && graph.apfl.is_none()
+        && graph.synthetic_repack.is_none()
+        && graph.expert_compression.is_none()
         && !graph.mixed_expert_precision
         && graph.ordered_expert_projection.is_none()
         && graph.expert_bits == 4
