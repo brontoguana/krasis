@@ -1,7 +1,9 @@
-## 2026-11-12 — Correct sparse attention attribution scope
+## 2026-11-12 — Replace experimental KDA recurrence
 
-- Remove the sparse attention attribution and licence cross-references from source comments and all affected local development histories.
-- Preserve executable code, benchmark results and runtime defaults; this change affects comments and history only.
+- Replace the three split-recurrence variants with the prepared relay kernel. Preserve the BF16 preparation boundary, ordered FP32 arithmetic, and graph/chunk state contract. Retire raw and beta-only diagnostic modes with an explicit configuration error.
+- Enable KDA_RELAY within the existing GLM-5.3 recurrence control. Its compile-time opt-out uses the original independent tiled recurrence. Retire the superseded readout-array switch.
+- Captured layers 0 and 4 match every output and state bit on Ampere and Blackwell, including chunk carry and graph replay. Memory and race checks pass. Long A6000 replay improves 11.48 to 6.53 ms; full-model timing remains unmeasured.
+- Remove the replaced implementation and its third-party notices and packaging entries from affected local development histories. Keep recovery data outside Git. No installed native binary, main merge or release changes.
 
 ## 2026-11-10 — Screen the five-route cold pruning policy
 
@@ -172,7 +174,6 @@
 
 - 2026-11-04: Add a default-off SM86 GLM-5.3 gathered-attention dispatch experiment for the measured pedantic geometry, limited to workspace tiles of two through four rows; larger tiles and other devices, shapes and arithmetic fall back unchanged. Requires full runtime and quality qualification.
 
-- 2026-11-03: Add a default-off experimental split KDA recurrence with a complete-output/state oracle fixture; unqualified.
 
 - 2026-11-03: Add default-off experimental DSA workspace-row budgeting and gathered-GEMM tile-row controls for GLM prefill investigation. These controls are unqualified and require numerical, safety and performance testing before use.
 

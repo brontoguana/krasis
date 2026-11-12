@@ -99667,7 +99667,6 @@ mod kernel_tests {
             .unwrap();
         }
 
-
         let d_q = ctx.upload_bf16(&bf16_bytes(&q));
         let d_k = ctx.upload_bf16(&bf16_bytes(&k));
         let d_v = ctx.upload_bf16(&bf16_bytes(&v));

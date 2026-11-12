@@ -15232,5 +15232,4 @@ extern "C" __global__ void record_globaltimer_u64_g(
 
 #include "kda_relay.cuh"
 
-
 #include "streamed_cold.cuh"
