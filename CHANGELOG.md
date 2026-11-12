@@ -5,6 +5,8 @@
 - Captured layers 0 and 4 match every output and state bit on Ampere and Blackwell, including chunk carry and graph replay. Memory and race checks pass. Long A6000 replay improves 11.48 to 6.53 ms; full-model timing remains unmeasured.
 - Remove the replaced implementation and its third-party notices and packaging entries from affected local development histories. Keep recovery data outside Git. No installed native binary, main merge or release changes.
 
+- Include the relay CUDA header in heatmap code identity so future kernel-only edits invalidate cached calibration.
+
 ## 2026-11-10 — Screen the five-route cold pruning policy
 
 - Add default-off COLD_EXPERT_PRUNING_FIVE, refining the accepted cold-only policy to protect five of eight leading routes and cap dropped mass at 25% per layer. Resident routes remain protected by the existing cold-only test.

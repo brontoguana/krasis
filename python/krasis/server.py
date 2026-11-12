@@ -496,6 +496,7 @@ def _krasis_runtime_code_hash() -> dict[str, Any]:
         "src/weights/mod.rs",
         "src/weights/mixed_precision.rs",
         "src/cuda/decode_kernels.cu",
+        "src/cuda/kda_relay.cuh",
         "src/cuda/prefill_kernels.cu",
     ]
     h = hashlib.sha256()
