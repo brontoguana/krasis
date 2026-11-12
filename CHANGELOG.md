@@ -1,3 +1,8 @@
+## 2026-11-12 — Correct sparse attention attribution scope
+
+- Remove the sparse attention attribution and licence cross-references from source comments and all affected local development histories.
+- Preserve executable code, benchmark results and runtime defaults; this change affects comments and history only.
+
 ## 2026-11-10 — Screen the five-route cold pruning policy
 
 - Add default-off COLD_EXPERT_PRUNING_FIVE, refining the accepted cold-only policy to protect five of eight leading routes and cap dropped mass at 25% per layer. Resident routes remain protected by the existing cold-only test.
