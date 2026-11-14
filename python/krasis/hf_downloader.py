@@ -392,6 +392,7 @@ class HFModelCandidate:
     selected_files: List[str]
     safetensors_file_count: int
     summary: str
+    key: str = ""
     display_name: str = ""
     local_dir_name: str = ""
     revision: str = ""
@@ -511,6 +512,7 @@ def supported_model_for_path(model_path: str) -> Optional[SupportedHFModel]:
 
 
 def _apply_supported_spec(candidate: HFModelCandidate, spec: SupportedHFModel) -> HFModelCandidate:
+    candidate.key = spec.key
     candidate.display_name = spec.display_name
     candidate.local_dir_name = spec.local_dir_name
     candidate.revision = spec.revision
